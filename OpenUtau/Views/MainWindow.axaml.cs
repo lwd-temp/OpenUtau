@@ -174,8 +174,8 @@ namespace OpenUtau.App.Views {
                         DocManager.Inst.EndUndoGroup();
                     }
                 } catch (Exception e) {
-                    Log.Error(e, "Failed to open project location.");
-                    MessageBox.ShowError(this, e);
+                    Log.Error(e, "Failed to open project location");
+                    MessageBox.ShowError(this, new MessageCustomizableException("Failed to open project location", "<translate:errors.failed.openlocation>: project location", e));
                 }
             };
             dialog.ShowDialog(this);
@@ -229,7 +229,7 @@ namespace OpenUtau.App.Views {
                 viewModel.OpenProject(files);
             } catch (Exception e) {
                 Log.Error(e, $"Failed to open files {string.Join("\n", files)}");
-                _ = await MessageBox.ShowError(this, e);
+                _ = await MessageBox.ShowError(this, new MessageCustomizableException($"Failed to open files {string.Join("\n", files)}", $"<translate:errors.failed.openfile>:\n{string.Join("\n", files)}", e));
             }
         }
 
@@ -265,7 +265,7 @@ namespace OpenUtau.App.Views {
                 }
             } catch (Exception e) {
                 Log.Error(e, "Failed to open project location.");
-                MessageBox.ShowError(this, e);
+                MessageBox.ShowError(this, new MessageCustomizableException("Failed to open project location.", "<translate:errors.failed.openlocation>: project location", e));
             }
         }
 
@@ -351,7 +351,7 @@ namespace OpenUtau.App.Views {
                 viewModel.ImportTracks(loadedProjects, importTempo);
             } catch (Exception e) {
                 Log.Error(e, $"Failed to import files");
-                _ = await MessageBox.ShowError(this, e);
+                _ = await MessageBox.ShowError(this, new MessageCustomizableException("Failed to import files", "<translate:errors.failed.importfiles>", e));
             }
             ValidateTracksVoiceColor();
         }
@@ -366,7 +366,7 @@ namespace OpenUtau.App.Views {
                 viewModel.ImportAudio(file);
             } catch (Exception e) {
                 Log.Error(e, "Failed to import audio");
-                _ = await MessageBox.ShowError(this, e);
+                _ = await MessageBox.ShowError(this, new MessageCustomizableException("Failed to import audio", "<translate:errors.failed.importaudio>", e));
             }
         }
 
@@ -380,7 +380,7 @@ namespace OpenUtau.App.Views {
                 viewModel.ImportMidi(file, UseDrywetmidi);
             } catch (Exception e) {
                 Log.Error(e, "Failed to import midi");
-                _ = await MessageBox.ShowError(this, e);
+                _ = await MessageBox.ShowError(this, new MessageCustomizableException("Failed to import midi", "<translate:errors.failed.importmidi>", e));
             }
         }
 
@@ -522,6 +522,9 @@ namespace OpenUtau.App.Views {
             return true;
         }
 
+        void OnMenuUndo(object sender, RoutedEventArgs args) => viewModel.Undo();
+        void OnMenuRedo(object sender, RoutedEventArgs args) => viewModel.Redo();
+
         void OnMenuExpressionss(object sender, RoutedEventArgs args) {
             var dialog = new ExpressionsDialog() {
                 DataContext = new ExpressionsViewModel(),
@@ -554,7 +557,7 @@ namespace OpenUtau.App.Views {
                 return;
             }
 
-            DocManager.Inst.ExecuteCmd(new LoadingNotification(typeof(MainWindow), true, "singers window"));
+            MessageBox.ShowLoading(this);
             var dialog = lifetime.Windows.FirstOrDefault(w => w is SingersDialog);
             try {
                 if (dialog == null) {
@@ -578,7 +581,7 @@ namespace OpenUtau.App.Views {
             } catch (Exception e) {
                 DocManager.Inst.ExecuteCmd(new ErrorMessageNotification(e));
             } finally {
-                DocManager.Inst.ExecuteCmd(new LoadingNotification(typeof(MainWindow), false, "singers window"));
+                MessageBox.CloseLoading();
             }
             if (dialog != null) {
                 dialog.Activate();
@@ -591,15 +594,16 @@ namespace OpenUtau.App.Views {
             if (file == null) {
                 return;
             }
-            if (file.EndsWith(Core.Vogen.VogenSingerInstaller.FileExt)) {
-                Core.Vogen.VogenSingerInstaller.Install(file);
-                return;
-            }
-            if (file.EndsWith(DependencyInstaller.FileExt)) {
-                DependencyInstaller.Install(file);
-                return;
-            }
             try {
+                if (file.EndsWith(Core.Vogen.VogenSingerInstaller.FileExt)) {
+                    Core.Vogen.VogenSingerInstaller.Install(file);
+                    return;
+                }
+                if (file.EndsWith(DependencyInstaller.FileExt)) {
+                    DependencyInstaller.Install(file);
+                    return;
+                }
+
                 var setup = new SingerSetupDialog() {
                     DataContext = new SingerSetupViewModel() {
                         ArchiveFilePath = file,
@@ -610,7 +614,14 @@ namespace OpenUtau.App.Views {
                     setup.Position = setup.Position.WithY(0);
                 }
             } catch (Exception e) {
-                _ = MessageBox.ShowError(this, e);
+                Log.Error(e, $"Failed to install singer {file}");
+                MessageCustomizableException mce;
+                if(e is MessageCustomizableException){
+                    mce = (MessageCustomizableException)e;
+                } else {
+                    mce = new MessageCustomizableException($"Failed to install singer {file}", $"<translate:errors.failed.installsinger>: {file}", e);
+                }
+                _ = await MessageBox.ShowError(this, mce);
             }
         }
 
@@ -632,7 +643,7 @@ namespace OpenUtau.App.Views {
                 dataContext = new PreferencesViewModel();
             } catch (Exception e) {
                 Log.Error(e, "Failed to load prefs. Initialize it.");
-                MessageBox.ShowError(this, e);
+                MessageBox.ShowError(this, new MessageCustomizableException("Failed to load prefs. Initialize it.", "<translate:errors.failed.loadprefs>", e));
                 Preferences.Reset();
                 dataContext = new PreferencesViewModel();
             }
@@ -838,24 +849,35 @@ namespace OpenUtau.App.Views {
                     viewModel.OpenProject(new string[] { file });
                 } catch (Exception e) {
                     Log.Error(e, $"Failed to open file {file}");
-                    _ = await MessageBox.ShowError(this, e);
+                    _ = await MessageBox.ShowError(this, new MessageCustomizableException($"Failed to open file {file}", $"<translate:errors.failed.openfile>: {file}", e));
                 }
             } else if (ext == ".mid" || ext == ".midi") {
                 try {
                     viewModel.ImportMidi(file);
                 } catch (Exception e) {
                     Log.Error(e, "Failed to import midi");
-                    _ = await MessageBox.ShowError(this, e);
+                    _ = await MessageBox.ShowError(this, new MessageCustomizableException("Failed to import midi", "<translate:errors.failed.importmidi>", e));
                 }
             } else if (ext == ".zip" || ext == ".rar" || ext == ".uar") {
-                var setup = new SingerSetupDialog() {
-                    DataContext = new SingerSetupViewModel() {
-                        ArchiveFilePath = file,
-                    },
-                };
-                _ = setup.ShowDialog(this);
-                if (setup.Position.Y < 0) {
-                    setup.Position = setup.Position.WithY(0);
+                try{
+                    var setup = new SingerSetupDialog() {
+                        DataContext = new SingerSetupViewModel() {
+                            ArchiveFilePath = file,
+                        },
+                    };
+                    _ = setup.ShowDialog(this);
+                    if (setup.Position.Y < 0) {
+                        setup.Position = setup.Position.WithY(0);
+                    }
+                } catch (Exception e) {
+                    Log.Error(e, $"Failed to install singer {file}");
+                    MessageCustomizableException mce;
+                    if(e is MessageCustomizableException){
+                        mce = (MessageCustomizableException)e;
+                    } else {
+                        mce = new MessageCustomizableException($"Failed to install singer {file}", $"<translate:errors.failed.installsinger>: {file}", e);
+                    }
+                    _ = await MessageBox.ShowError(this, mce);
                 }
             } else if (ext == Core.Vogen.VogenSingerInstaller.FileExt) {
                 Core.Vogen.VogenSingerInstaller.Install(file);
@@ -890,7 +912,7 @@ namespace OpenUtau.App.Views {
                     viewModel.ImportAudio(file);
                 } catch (Exception e) {
                     Log.Error(e, "Failed to import audio");
-                    _ = await MessageBox.ShowError(this, e);
+                    _ = await MessageBox.ShowError(this, new MessageCustomizableException("Failed to import audio", "<translate:errors.failed.importaudio>", e));
                 }
             } else {
                 _ = await MessageBox.Show(
@@ -1074,12 +1096,12 @@ namespace OpenUtau.App.Views {
             var control = canvas.InputHitTest(args.GetPosition(canvas));
             if (control is PartControl partControl && partControl.part is UVoicePart) {
                 if (pianoRollWindow == null) {
-                    DocManager.Inst.ExecuteCmd(new LoadingNotification(typeof(MainWindow), true, "pianoroll window"));
+                    MessageBox.ShowLoading(this);
                     pianoRollWindow = new PianoRollWindow() {
                         MainWindow = this,
                     };
                     pianoRollWindow.ViewModel.PlaybackViewModel = viewModel.PlaybackViewModel;
-                    DocManager.Inst.ExecuteCmd(new LoadingNotification(typeof(MainWindow), false, "pianoroll window"));
+                    MessageBox.CloseLoading();
                 }
                 // Workaround for new window losing focus.
                 openPianoRollWindow = true;
@@ -1276,7 +1298,6 @@ namespace OpenUtau.App.Views {
                     }
                 }
             }
-
         }
 
         public async void WindowClosing(object? sender, WindowClosingEventArgs e) {
@@ -1326,7 +1347,7 @@ namespace OpenUtau.App.Views {
                            MessageBox.MessageBoxButtons.Ok);
                         break;
                     default:
-                        MessageBox.ShowError(this, notif.message, notif.e);
+                        MessageBox.ShowError(this, notif.e, notif.message, true);
                         break;
                 }
             } else if (cmd is LoadingNotification loadingNotif && loadingNotif.window == typeof(MainWindow)) {

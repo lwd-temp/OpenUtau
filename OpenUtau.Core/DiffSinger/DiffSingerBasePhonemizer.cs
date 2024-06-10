@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using K4os.Hash.xxHash;
 using Serilog;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
 using OpenUtau.Api;
 using OpenUtau.Core.Ustx;
+using OpenUtau.Core.Util;
 
 namespace OpenUtau.Core.DiffSinger
 {
@@ -17,6 +19,8 @@ namespace OpenUtau.Core.DiffSinger
         DsConfig dsConfig;
         string rootPath;
         float frameMs;
+        ulong linguisticHash;
+        ulong durationHash;
         InferenceSession linguisticModel;
         InferenceSession durationModel;
         IG2p g2p;
@@ -28,6 +32,13 @@ namespace OpenUtau.Core.DiffSinger
 
         public override void SetSinger(USinger singer) {
             this.singer = singer;
+            if(singer==null){
+                return;
+            }
+            if(singer.Location == null){
+                Log.Error("Singer location is null");
+                return;
+            }
             if (File.Exists(Path.Join(singer.Location, "dsdur", "dsconfig.yaml"))) {
                 rootPath = Path.Combine(singer.Location, "dsdur");
             } else {
@@ -51,14 +62,18 @@ namespace OpenUtau.Core.DiffSinger
             //Load models
             var linguisticModelPath = Path.Join(rootPath, dsConfig.linguistic);
             try {
-                linguisticModel = new InferenceSession(linguisticModelPath);
+                var linguisticModelBytes = File.ReadAllBytes(linguisticModelPath);
+                linguisticHash = XXH64.DigestOf(linguisticModelBytes);
+                linguisticModel = new InferenceSession(linguisticModelBytes);
             } catch (Exception e) {
                 Log.Error(e, $"failed to load linguistic model from {linguisticModelPath}");
                 return;
             }
             var durationModelPath = Path.Join(rootPath, dsConfig.dur);
             try {
-                durationModel = new InferenceSession(durationModelPath);
+                var durationModelBytes = File.ReadAllBytes(durationModelPath);
+                durationHash = XXH64.DigestOf(durationModelBytes);
+                durationModel = new InferenceSession(durationModelBytes);
             } catch (Exception e) {
                 Log.Error(e, $"failed to load duration model from {durationModelPath}");
                 return;
@@ -66,20 +81,28 @@ namespace OpenUtau.Core.DiffSinger
         }
 
         protected virtual IG2p LoadG2p(string rootPath) {
+            //Each phonemizer has a delicated dictionary name, such as dsdict-en.yaml, dsdict-ru.yaml.
+            //If this dictionary exists, load it.
+            //If not, load dsdict.yaml.
             var g2ps = new List<IG2p>();
             var dictionaryNames = new string[] {GetDictionaryName(), "dsdict.yaml"};
             // Load dictionary from singer folder.
+            G2pDictionary.Builder g2pBuilder = new G2pDictionary.Builder();
             foreach(var dictionaryName in dictionaryNames){
                 string dictionaryPath = Path.Combine(rootPath, dictionaryName);
                 if (File.Exists(dictionaryPath)) {
                     try {
-                        g2ps.Add(G2pDictionary.NewBuilder().Load(File.ReadAllText(dictionaryPath)).Build());
+                        g2pBuilder.Load(File.ReadAllText(dictionaryPath)).Build();
                     } catch (Exception e) {
                         Log.Error(e, $"Failed to load {dictionaryPath}");
                     }
                     break;
                 }
             }
+            //SP and AP should always be vowel
+            g2pBuilder.AddSymbol("SP", true);
+            g2pBuilder.AddSymbol("AP", true);
+            g2ps.Add(g2pBuilder.Build());
             return new G2pFallbacks(g2ps.ToArray());
         }
 
@@ -140,7 +163,7 @@ namespace OpenUtau.Core.DiffSinger
             var isGlide = dsPhonemes.Select(s => g2p.IsGlide(s.Symbol)).ToArray();
             var nonExtensionNotes = notes.Where(n=>!IsSyllableVowelExtensionNote(n)).ToArray();
             var isStart = new bool[dsPhonemes.Length];
-            if(!isStart.Any()){
+            if(isVowel.All(b=>!b)){
                 isStart[0] = true;
             }
             for(int i=0; i<dsPhonemes.Length; i++){
@@ -203,6 +226,14 @@ namespace OpenUtau.Core.DiffSinger
             }
             return speakerEmbedManager;
         }
+
+        int PhonemeTokenize(string phoneme){
+            int result = phonemes.IndexOf(phoneme);
+            if(result < 0){
+                throw new Exception($"Phoneme \"{phoneme}\" isn't supported by timing model. Please check {Path.Combine(rootPath, dsConfig.phonemes)}");
+            }
+            return result;
+        }
         
         protected override void ProcessPart(Note[][] phrase) {
             float padding = 500f;//Padding time for consonants at the beginning of a sentence, ms
@@ -239,7 +270,7 @@ namespace OpenUtau.Core.DiffSinger
             //Linguistic Encoder
             var tokens = phrasePhonemes
                 .SelectMany(n => n.Phonemes)
-                .Select(p => (Int64)phonemes.IndexOf(p.Symbol))
+                .Select(p => (Int64)PhonemeTokenize(p.Symbol))
                 .ToArray();
             var word_div = phrasePhonemes.Take(phrasePhonemes.Count-1)
                 .Select(n => (Int64)n.Phonemes.Count)
@@ -260,7 +291,14 @@ namespace OpenUtau.Core.DiffSinger
                 new DenseTensor<Int64>(word_dur, new int[] { word_dur.Length }, false)
                 .Reshape(new int[] { 1, word_dur.Length })));
             Onnx.VerifyInputNames(linguisticModel, linguisticInputs);
-            var linguisticOutputs = linguisticModel.Run(linguisticInputs);
+            var linguisticCache = Preferences.Default.DiffSingerTensorCache
+                ? new DiffSingerCache(linguisticHash, linguisticInputs)
+                : null;
+            var linguisticOutputs = linguisticCache?.Load();
+            if (linguisticOutputs is null) {
+                linguisticOutputs = linguisticModel.Run(linguisticInputs).Cast<NamedOnnxValue>().ToList();
+                linguisticCache?.Save(linguisticOutputs);
+            }
             Tensor<float> encoder_out = linguisticOutputs
                 .Where(o => o.Name == "encoder_out")
                 .First()
@@ -291,7 +329,14 @@ namespace OpenUtau.Core.DiffSinger
                 durationInputs.Add(NamedOnnxValue.CreateFromTensor("spk_embed", spkEmbedTensor));
             }
             Onnx.VerifyInputNames(durationModel, durationInputs);
-            var durationOutputs = durationModel.Run(durationInputs);
+            var durationCache = Preferences.Default.DiffSingerTensorCache
+                ? new DiffSingerCache(durationHash, durationInputs)
+                : null;
+            var durationOutputs = durationCache?.Load();
+            if (durationOutputs is null) {
+                durationOutputs = durationModel.Run(durationInputs).Cast<NamedOnnxValue>().ToList();
+                durationCache?.Save(durationOutputs);
+            }
             List<double> durationFrames = durationOutputs.First().AsTensor<float>().Select(x=>(double)x).ToList();
             
             //Alignment
